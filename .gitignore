@@ -25,5 +25,4 @@ Thumbs.db
 # Streamlit
 .streamlit/secrets.toml
 
-# Vector database (will be regenerated on deployment)
-chroma_db/
+# Vector database is tracked via Git LFS
