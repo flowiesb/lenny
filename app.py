@@ -70,15 +70,83 @@ def init_session_state():
         st.session_state.vector_store = None
 
 
-def load_vector_store():
-    """Load the ChromaDB vector store."""
-    if not CHROMA_PERSIST_DIR.exists():
-        return None
+def run_ingestion():
+    """Run the ingestion pipeline to create the vector store."""
+    import json
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    from langchain.schema import Document
     
+    TRANSCRIPTS_DIR = Path(__file__).parent / "Lenny's Podcast Transcripts Archive"
+    METADATA_FILE = Path(__file__).parent / "episode_metadata.json"
+    
+    # Load episode metadata
+    episode_metadata = {}
+    if METADATA_FILE.exists():
+        with open(METADATA_FILE, "r") as f:
+            episode_metadata = json.load(f)
+    
+    # Load transcripts
+    transcript_files = list(TRANSCRIPTS_DIR.glob("*.txt"))
+    documents = []
+    
+    for filepath in transcript_files:
+        guest_name = filepath.stem
+        with open(filepath, "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        guest_meta = episode_metadata.get(guest_name, {})
+        doc = Document(
+            page_content=content,
+            metadata={
+                "guest": guest_name,
+                "source": filepath.name,
+                "episode_title": guest_meta.get("episode_title", f"Lenny's Podcast: {guest_name}"),
+                "episode_date": guest_meta.get("date", "Unknown"),
+                "guest_description": guest_meta.get("guest_description", "Product management expert")
+            }
+        )
+        documents.append(doc)
+    
+    # Chunk documents
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=4000,
+        chunk_overlap=800,
+        separators=["\n\n", "\n", ". ", " ", ""]
+    )
+    
+    chunked_docs = []
+    for doc in documents:
+        chunks = text_splitter.split_text(doc.page_content)
+        for i, chunk in enumerate(chunks):
+            chunked_docs.append(Document(
+                page_content=chunk,
+                metadata={**doc.metadata, "chunk_index": i}
+            ))
+    
+    # Create vector store
+    api_key = get_openai_api_key()
+    if api_key:
+        os.environ["OPENAI_API_KEY"] = api_key
+    
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+    vector_store = Chroma.from_documents(
+        documents=chunked_docs,
+        embedding=embeddings,
+        persist_directory=str(CHROMA_PERSIST_DIR)
+    )
+    
+    return vector_store
+
+
+def load_vector_store():
+    """Load the ChromaDB vector store, or create it if it doesn't exist."""
     # Set API key for embeddings
     api_key = get_openai_api_key()
     if api_key:
         os.environ["OPENAI_API_KEY"] = api_key
+    
+    if not CHROMA_PERSIST_DIR.exists():
+        return None
     
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     vector_store = Chroma(
@@ -213,10 +281,19 @@ def main():
         with st.spinner("Loading knowledge base..."):
             st.session_state.vector_store = load_vector_store()
     
+    # Auto-generate if not found
     if st.session_state.vector_store is None:
-        st.warning("⚠️ Knowledge base not found. Please run `python ingest.py` first to index the transcripts.")
-        st.code("python ingest.py", language="bash")
-        st.stop()
+        st.info("🔄 Building knowledge base for the first time. This takes about 5-10 minutes...")
+        progress_bar = st.progress(0, text="Indexing 302 podcast transcripts...")
+        
+        try:
+            st.session_state.vector_store = run_ingestion()
+            progress_bar.progress(100, text="Done!")
+            st.success("✅ Knowledge base ready!")
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Failed to build knowledge base: {e}")
+            st.stop()
     
     # Display chat history
     for message in st.session_state.messages:
